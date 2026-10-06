@@ -13,11 +13,13 @@ class BudgetService:
     def __init__(self, repository: JsonlRepository): self.repo = repository
 
     def categories(self) -> set[str]:
+        # 등록된 이름을 목록 조회·거래 검증에 사용할 중복 없는 집합으로 모은다.
         return {row['name'] for row in self.repo.read('categories')}
 
     def transactions(self) -> Iterator[Transaction]:
         categories = self.categories()
         for row in self.repo.read('transactions'):
+            # 다음 값 요청마다 한 건을 검증·변환해 전달하므로 전체 거래를 메모리에 모으지 않는다.
             yield Transaction.create(row, categories)
 
     def search(self, start=None, end=None, category=None, kind=None, q=None, tag=None, month=None) -> Iterator[Transaction]:
@@ -34,6 +36,7 @@ class BudgetService:
             if kind and tx.type != kind: continue
             if q and q.casefold() not in tx.memo.casefold(): continue
             if tag and tag not in tx.tags: continue
+            # 모든 조건을 통과한 거래만 전달하고, 다음 값 요청까지 실행을 멈춘다.
             yield tx
 
     def add(self, raw: dict[str, Any]) -> Transaction:
@@ -42,7 +45,10 @@ class BudgetService:
         return tx
 
     def _insert(self, additions: list[Transaction], remove_id=None) -> None:
+        # 내부 공통 저장 처리: 추가분을 합치고 remove_id에 해당하는 기존 거래를 제외한다.
+        # 기존 파일이 내림차순이라는 전제에서 날짜·ID 내림차순을 유지한다.
         additions.sort(key=lambda tx: (tx.date, tx.id), reverse=True)
+        # 수정은 기존 거래 제외와 변경된 거래 추가로, 삭제는 추가분 없이 처리한다.
         def merged():
             index = 0
             found = False
@@ -60,6 +66,7 @@ class BudgetService:
 
     def update(self, identifier: str, changes: dict[str, Any]) -> None:
         if not changes: raise AppError('수정할 옵션을 하나 이상 입력하세요. update --help를 확인하세요.')
+        # ID가 일치하는 첫 거래에서 탐색을 멈추고, 없으면 None을 반환한다.
         old = next((tx for tx in self.transactions() if tx.id == identifier), None)
         if old is None: raise AppError('없는 데이터입니다. list/search로 id를 확인하세요.')
         self._insert([Transaction.create(dict(old.record(), **changes), self.categories())], identifier)
@@ -67,17 +74,20 @@ class BudgetService:
     def delete(self, identifier: str) -> None: self._insert([], identifier)
 
     def category_change(self, name: str, remove=False) -> None:
+        # remove=False면 추가, True면 삭제한다. 공백을 제거하고 빈 이름·중복을 검증한다.
         name = name.strip()
         if not name: raise AppError('카테고리 이름을 입력하세요.')
         categories = self.categories()
         if remove:
             if name not in categories: raise AppError('없는 카테고리입니다. category list를 확인하세요.')
+            # 사용 중인 거래가 하나라도 있으면 삭제를 막아 거래의 카테고리 참조를 유지한다.
             if any(tx.category == name for tx in self.transactions()):
                 raise AppError('사용 중인 카테고리는 삭제할 수 없습니다. 거래를 수정/삭제하세요.')
             categories.remove(name)
         else:
             if name in categories: raise AppError('이미 등록된 카테고리입니다. 다른 이름을 입력하세요.')
             categories.add(name)
+        # 변경한 등록 이름을 이름순으로 정렬해 파일에 저장한다.
         self.repo.write('categories', ({'name': c} for c in sorted(categories)))
 
     def budgets(self) -> dict[str, int]:
